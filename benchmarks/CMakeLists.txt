@@ -1,0 +1,3 @@
+add_executable(NanoMatchBenchmarks benchmark_engine.cpp)
+target_link_libraries(NanoMatchBenchmarks PRIVATE benchmark::benchmark)
+target_compile_options(NanoMatchBenchmarks PRIVATE -Werror)

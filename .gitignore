@@ -1,0 +1,29 @@
+# CMake build directories
+build/
+build_asan/
+build_warnings/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+
+# Executables and object files
+*.exe
+*.obj
+*.o
+*.a
+*.lib
+*.dll
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.suo
+*.sln
+*.user
+.DS_Store
