@@ -1,29 +1,29 @@
-# Welcome to NanoMatch! Let's Learn High-Frequency Trading.
+# Welcome to NanoMatch! Let's Explore High-Frequency Trading.
 
 Hello there! If you are a fresher, a student, or a software engineer looking to break into the fascinating world of Quantitative Finance and High-Frequency Trading (HFT), you are exactly in the right place. 
 
 I'm going to walk you through **NanoMatch**, a C++20 Limit Order Book matching engine. 
 
-Think of this repository not just as code, but as a classroom. We are going to build an engine that runs at **13 Million operations per second** with a delay of just **50 CPU cycles**. 
+Think of this repository not just as code, but as an engineering deep-dive. We are going to build an engine that runs at **13 Million operations per second** with a delay of just **50 CPU cycles**. 
 
-To get that fast, we have to break almost every rule you were taught in your Computer Science classes. Let's learn exactly *why* standard programming fails in HFT, and how we engineered around it!
+To get that fast, we have to break almost every rule you were taught in traditional Computer Science classes. Let's explore exactly *why* standard programming fails in HFT, and how we engineered around it!
 
 ---
 
-## 📖 Our Lesson Plan
+## 📖 Core Concepts
 1. [Introduction: What is an Order Book?](#1-introduction-what-is-an-order-book)
-2. [Lesson 1: Zero-Allocation (Why `new` is too slow)](#2-lesson-1-zero-allocation-why-new-is-too-slow)
-3. [Lesson 2: CPU Caching (OOP vs. Data-Oriented Design)](#3-lesson-2-cpu-caching-oop-vs-data-oriented-design)
-4. [Lesson 3: Fast Discovery (Bitmaps & Hardware Magic)](#4-lesson-3-fast-discovery-bitmaps--hardware-magic)
-5. [Lesson 4: Concurrency (Lock-Free Queues)](#5-lesson-4-concurrency-lock-free-queues)
-6. [Lesson 5: Thread Pinning (Fighting the OS)](#6-lesson-5-thread-pinning-fighting-the-os)
-7. [Lesson 6: Networking (Strings and Floats are forbidden)](#7-lesson-6-networking-strings-and-floats-are-forbidden)
-8. [Trade-Offs & Homework (How to Run)](#8-trade-offs--homework-how-to-run)
+2. [Zero-Allocation (Why `new` is too slow)](#2-zero-allocation-why-new-is-too-slow)
+3. [CPU Caching (OOP vs. Data-Oriented Design)](#3-cpu-caching-oop-vs-data-oriented-design)
+4. [Fast Discovery (Bitmaps & Hardware Magic)](#4-fast-discovery-bitmaps--hardware-magic)
+5. [Concurrency (Lock-Free Queues)](#5-concurrency-lock-free-queues)
+6. [Thread Pinning (Fighting the OS)](#6-thread-pinning-fighting-the-os)
+7. [Networking (Strings and Floats are forbidden)](#7-networking-strings-and-floats-are-forbidden)
+8. [Trade-Offs & How to Run](#8-trade-offs--how-to-run)
 
 ---
 
 ## 1. Introduction: What is an Order Book?
-Imagine you open Robinhood and want to buy a share of Apple. Where does that order actually go? 
+Imagine you open an app like Robinhood and want to buy a share of Apple. Where does that order actually go? 
 It goes to a central Exchange (like Nasdaq). The exchange keeps a massive ledger called a **Limit Order Book (LOB)**. It has two lists:
 *   **Bids (Buyers):** People who want to buy, sorted by who is willing to pay the most.
 *   **Asks (Sellers):** People who want to sell, sorted by who will sell for the cheapest.
@@ -32,7 +32,7 @@ When a buyer's price matches a seller's price, the exchange executes a trade! In
 
 ---
 
-## 2. Lesson 1: Zero-Allocation (Why `new` is too slow)
+## 2. Zero-Allocation (Why `new` is too slow)
 
 ### The Problem
 In your college classes, you probably learned to use `new Order()` or `malloc` whenever you needed to create data. But think about what happens behind the scenes! Your program has to stop, ask the Operating System for memory, wait for the OS to lock a memory table, find a free spot, and return it. This takes thousands of nanoseconds. In HFT, that is an eternity.
@@ -45,7 +45,7 @@ When an order arrives, we just say: `give me index 0`. Next order? `give me inde
 
 ---
 
-## 3. Lesson 2: CPU Caching (OOP vs. Data-Oriented Design)
+## 3. CPU Caching (OOP vs. Data-Oriented Design)
 
 ### The Problem
 Object-Oriented Programming (OOP) teaches us to group data together into objects. You might write:
@@ -65,7 +65,7 @@ Now, when the engine searches for the best price, the CPU loads a pure block of 
 
 ---
 
-## 4. Lesson 3: Fast Discovery (Bitmaps & Hardware Magic)
+## 4. Fast Discovery (Bitmaps & Hardware Magic)
 
 ### The Problem
 If you need to find the highest bid, how would you do it? A `for` loop, right? `for (int i = 0; i < max; i++)`. But loops require branching logic, which can confuse the CPU pipeline and cause delays.
@@ -77,7 +77,7 @@ To find the highest price, we don't loop! We use a special Intel hardware instru
 
 ---
 
-## 5. Lesson 4: Concurrency (Lock-Free Queues)
+## 5. Concurrency (Lock-Free Queues)
 
 ### The Problem
 When two threads need to share data, you are taught to use a `std::mutex` (a lock). But if Thread A holds the lock, Thread B gets "put to sleep" by the OS. Waking a thread back up takes 10,000 nanoseconds!
@@ -88,7 +88,7 @@ We pass data from our Network Thread to our Matching Engine using a fixed-size c
 
 ---
 
-## 6. Lesson 5: Thread Pinning (Fighting the OS)
+## 6. Thread Pinning (Fighting the OS)
 
 ### The Problem
 The Windows or Linux task scheduler is always trying to be helpful. It will randomly move your C++ program from CPU Core 0 to CPU Core 3 to balance the power load. But if it moves your program, all of your precious L1 cache data on Core 0 is erased!
@@ -99,7 +99,7 @@ Furthermore, when there are no orders to process, we do not call `sleep()`. We u
 
 ---
 
-## 7. Lesson 6: Networking (Strings and Floats are forbidden)
+## 7. Networking (Strings and Floats are forbidden)
 
 ### The Problem
 Computers are terrible at processing text strings (like `"AAPL"`) and floating-point decimals (`$103.50`). Decimals cause precision rounding errors, and strings require slow letter-by-letter comparison.
@@ -111,13 +111,13 @@ We pack this data into a perfectly tight 16-byte binary structure and send it ov
 
 ---
 
-## 8. Trade-Offs & Homework (How to Run)
+## 8. Trade-Offs & How to Run
 
 As an engineer, you must always understand your trade-offs:
 1. **Memory vs. Latency:** By using Bitmaps, we waste a lot of RAM to hold empty price slots. But in HFT, RAM is cheap, and CPU cycles are priceless!
 2. **TCP vs UDP:** We used TCP for orders because if an order drops, we *must* know about it. Re-inventing guaranteed delivery over UDP is often slower than the OS TCP stack.
 
-### Your Homework: Run the Engine!
+### Try it yourself!
 You can run this full distributed exchange right now on your computer. You just need CMake and Python.
 
 **1. Build the C++ Exchange:**
@@ -139,4 +139,4 @@ cd scripts
 python client.py
 ```
 
-Class dismissed! If you run the `NanoMatchTests.exe` in the `build/tests/` folder, you can watch the engine dynamically process 10,000 random orders perfectly. Have fun!
+If you run the `NanoMatchTests.exe` in the `build/tests/` folder, you can watch the engine dynamically process 10,000 random orders perfectly. Have fun!
