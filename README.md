@@ -77,14 +77,29 @@ To find the highest price, we don't loop! We use a special Intel hardware instru
 
 ---
 
-## 5. Concurrency (Lock-Free Queues)
+## 5. Concurrency: The SPSC Lock-Free Queue (Deep Dive)
 
-### The Problem
-When two threads need to share data, you are taught to use a `std::mutex` (a lock). But if Thread A holds the lock, Thread B gets "put to sleep" by the OS. Waking a thread back up takes 10,000 nanoseconds!
+### The Problem: Mutexes and Deadlocks
+When two threads need to share data, you are taught to use a `std::mutex` (a lock). But if Thread A holds the lock, Thread B gets "put to sleep" by the OS. Waking a thread back up takes 10,000 nanoseconds! In HFT, we cannot afford to put threads to sleep.
 
-### The Solution: Lock-Free Ring Buffers
-We pass data from our Network Thread to our Matching Engine using a fixed-size circle of memory called a Ring Buffer. We synchronize them using `std::atomic` variables. No thread ever goes to sleep!
-**A quick hardware trick:** If the `head` pointer and `tail` pointer are too close together in memory, both CPU cores will fight over the same Cache Line (this is called False Sharing). We use `alignas(64)` to force the pointers apart, keeping both CPUs running at max speed.
+### The Solution: Single-Producer Single-Consumer (SPSC) Ring Buffer
+To pass data from the Network Thread to the Matching Engine, we built a Lock-Free Ring Buffer. 
+Think of it like a circular sushi conveyor belt:
+*   **The Producer (Network Thread):** Only puts sushi on empty plates. It is the *only* thread that updates the `tail` index.
+*   **The Consumer (Matching Engine):** Only eats sushi from full plates. It is the *only* thread that updates the `head` index.
+Because they follow these strict rules, they never have to talk to each other (no Mutex required!).
+
+### Atomic Memory Orders (The Magic)
+Even without locks, modern CPUs are so fast they try to reorder instructions. A CPU might try to update the `tail` index *before* it finishes writing the actual data to RAM! To stop this, we use strict memory fences:
+*   **`std::memory_order_release`:** Used by the Producer. It guarantees that the CPU finishes writing the data to the array *before* the `tail` index is updated.
+*   **`std::memory_order_acquire`:** Used by the Consumer. It guarantees that the CPU sees the most up-to-date `tail` index *before* it attempts to read the data.
+
+### The Hardware Hack: False Sharing & `alignas(64)`
+A CPU reads memory in 64-byte chunks called **Cache Lines**. If you declare `head` and `tail` normally, the compiler puts them right next to each other. When the Producer updates `tail` on Core 1, the hardware invalidates the Consumer's L1 cache on Core 0, forcing Core 0 to reload the cache line even though `head` didn't change! This destroys performance. 
+We fixed this by forcing `head` and `tail` onto separate physical cache lines using `alignas(64)`. The CPU cores are now completely isolated.
+
+### The Math Hack: Bitwise Power of 2
+To wrap a ring buffer around, you normally use the modulo operator `(index % capacity)`. However, hardware division takes **15 to 20 CPU cycles**. We bypassed this by forcing our queue capacity to be a strict **Power of Two**. This allows us to use a bitwise AND operator `(index & (Capacity - 1))`, which wraps the array perfectly in exactly **1 CPU cycle**.
 
 ---
 
