@@ -65,6 +65,17 @@ graph TD
 
 ---
 
+## 🎯 Skills & Engineering Competencies Demonstrated
+
+This project serves as a comprehensive portfolio piece demonstrating practical, production-level experience in several core engineering domains:
+
+*   **Networking Fundamentals (TCP/IP):** Engineered a raw TCP socket server from scratch to handle raw byte streams, implementing zero-copy message batching and protecting against network fragmentation boundaries.
+*   **Unix Systems Administration:** Applied advanced Linux kernel tuning parameters for production HFT environments, including CPU isolation (`isolcpus`, `nohz_full`), `sysctl` network busy-polling (`net.core.busy_read`), and allocating HugePages to prevent TLB misses.
+*   **High-Performance Coding (C++20):** Developed the entire matching engine in C++20 using bare-metal optimization techniques (SIMD intrinsic instructions, wait-free ring buffers, custom memory allocators, and hardware cache-line alignment).
+*   **Scripting (Python & Shell):** Built an automated algorithmic market-maker client in Python to simulate high-load network traffic, alongside Shell/Bash configuration scripts for kernel modifications and CMake build orchestration.
+
+---
+
 ## 📖 Core Concepts
 1. [Introduction: What is an Order Book?](#1-introduction-what-is-an-order-book)
 2. [Networking (Zero-Bloat Anonymous Unions)](#2-networking-zero-bloat-anonymous-unions)
