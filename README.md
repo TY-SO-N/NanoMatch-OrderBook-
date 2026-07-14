@@ -1,12 +1,8 @@
-# Welcome to NanoMatch! Let's Explore Low-Latency Networking & HFT.
+# NanoMatch: Low-Latency Networked Matching Engine
 
-Hello there! If you are a fresher, a student, or a software engineer looking to break into the fascinating world of Quantitative Finance, ultra-low-latency Networking, and High-Frequency Trading (HFT), you are exactly in the right place. 
+NanoMatch is a distributed, high-frequency trading (HFT) matching engine engineered in C++20. It serves as a comprehensive demonstration of full-stack low-latency engineering, spanning from raw TCP network socket framing down to hardware-level SIMD CPU instructions. 
 
-I'm going to walk you through **NanoMatch**, a distributed C++20 Networked Matching Engine. 
-
-Think of this repository not just as code, but as a masterclass in full-stack performance engineering. We engineered this TCP server and matching core to process **14 Million operations per second** with an average end-to-end latency of exactly **~55 CPU cycles**. 
-
-To get that fast, we have to break almost every rule you were taught in traditional Computer Science classes—especially regarding network packets, thread communication, and memory allocation. Let's explore exactly *why* standard programming fails in HFT, and how we engineered around it!
+The system acts as a central Limit Order Book (LOB) exchange. It is designed to receive streaming trade requests over a network, execute wait-free concurrent matching logic, and maintain exact $O(1)$ time complexities. The engine has been rigorously benchmarked to process **14 Million operations per second** with an average end-to-end latency of **~55 CPU cycles**, bypassing traditional OS and memory bottlenecks entirely.
 
 ---
 
