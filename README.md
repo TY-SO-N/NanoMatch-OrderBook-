@@ -41,12 +41,12 @@ graph TD
         
         subgraph DataStructures ["Data Structures (Cache-Aligned)"]
             BitMap["active_bids / active_asks<br/>(64-bit Bitsets + clzll)"]:::memory
-            MemoryPool["OrderPool (SoA)<br/>(O(1) Intrusive Linked List)"]:::memory
+            MemoryPool["OrderPool (SoA)<br/>(O-1 Intrusive Linked List)"]:::memory
             Depth["depth_bids / depth_asks<br/>(L2 Volume Arrays)"]:::memory
         end
         
         SpinLoop -->|Pops messages| Engine
-        Engine -->|O(1) Price Lookup| BitMap
+        Engine -->|Constant-Time Price Lookup| BitMap
         Engine -->|Allocates/Plucks Order| MemoryPool
         Engine -->|Updates Volume| Depth
     end
@@ -57,9 +57,9 @@ graph TD
 
     %% Data Flow
     Bot == "Raw TCP Bytes" ==> TCP
-    Union == "queue_.push()" ==> RingBuffer
-    RingBuffer == "queue_.pop()<br/>(std::memory_order_acquire)" ==> SpinLoop
-    Depth -. "Protected by writeLock()" .-> SeqLock
+    Union == "queue_.push" ==> RingBuffer
+    RingBuffer == "queue_.pop Acquire Fence" ==> SpinLoop
+    Depth -. "Protected by writeLock" .-> SeqLock
     SeqLock -. "Reader verifies Sequence" .-> Broadcaster
 ```
 
