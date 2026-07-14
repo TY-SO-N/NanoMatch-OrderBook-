@@ -6,6 +6,25 @@ The system acts as a central Limit Order Book (LOB) exchange. It is designed to 
 
 ---
 
+## ⚙️ Tech Stack & Networking Concepts
+
+Built from the ground up for extreme network throughput and systems-level determinism, this project utilizes the following technologies and architectural concepts:
+
+### Tools & Frameworks
+*   **Languages:** C++20 (Engine & Network Server), Python 3 (Algorithmic Trading Bot).
+*   **Build & Testing:** CMake, MSYS2/MinGW GCC 16.1, Google Test (Adversarial Suite).
+*   **Systems Tools:** Unix `sysctl`, Linux `grub` tuning, Windows Winsock2 / POSIX Sockets.
+
+### Applied Networking & Systems Concepts (L4/L7)
+*   **TCP/IP Socket Programming:** Engineered raw non-blocking TCP sockets to handle high-throughput algorithmic trading feeds.
+*   **Zero-Copy TCP Framing:** Implemented $O(N)$ bulk-erasure logic to flawlessly parse fragmented and burst-bulked TCP byte streams without memory allocations.
+*   **Layer 7 Protocol Optimization:** Designed a strict 16-byte binary application protocol using **C++ Anonymous Unions** to completely eliminate packet bloat (banning strings and floats).
+*   **Nagle's Algorithm Bypass:** Enforced `TCP_NODELAY` to force immediate packet flushing across the wire.
+*   **Wait-Free Inter-Process Communication (IPC):** Synchronized the Network Thread and the CPU Execution Thread using Lock-Free SPSC Ring Buffers and `std::memory_order` hardware fences.
+*   **Unix Systems Determinism:** Leveraged CPU Core Isolation (`isolcpus`), network busy-polling (`net.core.busy_read`), and NUMA Thread Affinity (`pthread_setaffinity_np`) to eliminate OS context-switching jitter.
+
+---
+
 ## 🏗 System Architecture
 
 ```mermaid
