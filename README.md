@@ -1,12 +1,12 @@
-# Welcome to NanoMatch! Let's Explore High-Frequency Trading.
+# Welcome to NanoMatch! Let's Explore Low-Latency Networking & HFT.
 
-Hello there! If you are a fresher, a student, or a software engineer looking to break into the fascinating world of Quantitative Finance and High-Frequency Trading (HFT), you are exactly in the right place. 
+Hello there! If you are a fresher, a student, or a software engineer looking to break into the fascinating world of Quantitative Finance, ultra-low-latency Networking, and High-Frequency Trading (HFT), you are exactly in the right place. 
 
-I'm going to walk you through **NanoMatch**, a C++20 Limit Order Book matching engine. 
+I'm going to walk you through **NanoMatch**, a distributed C++20 Networked Matching Engine. 
 
-Think of this repository not just as code, but as an engineering deep-dive. We engineered this engine to process **14 Million operations per second** with an average latency of exactly **~55 CPU cycles**. 
+Think of this repository not just as code, but as a masterclass in full-stack performance engineering. We engineered this TCP server and matching core to process **14 Million operations per second** with an average end-to-end latency of exactly **~55 CPU cycles**. 
 
-To get that fast, we have to break almost every rule you were taught in traditional Computer Science classes. Let's explore exactly *why* standard programming fails in HFT, and how we engineered around it!
+To get that fast, we have to break almost every rule you were taught in traditional Computer Science classes—especially regarding network packets, thread communication, and memory allocation. Let's explore exactly *why* standard programming fails in HFT, and how we engineered around it!
 
 ---
 
@@ -67,13 +67,13 @@ graph TD
 
 ## 📖 Core Concepts
 1. [Introduction: What is an Order Book?](#1-introduction-what-is-an-order-book)
-2. [Zero-Allocation (Why `new` is too slow)](#2-zero-allocation-why-new-is-too-slow)
-3. [CPU Caching (OOP vs. Data-Oriented Design)](#3-cpu-caching-oop-vs-data-oriented-design)
-4. [Fast Discovery (Bitmaps & Hardware Magic)](#4-fast-discovery-bitmaps--hardware-magic)
-5. [Pure O(1) Cancellation (Intrusive Lists)](#5-pure-o1-cancellation-intrusive-lists)
-6. [Wait-Free Concurrency (Seqlocks & Ring Buffers)](#6-wait-free-concurrency-seqlocks--ring-buffers)
-7. [Networking (Zero-Bloat Anonymous Unions)](#7-networking-zero-bloat-anonymous-unions)
-8. [Thread Pinning (Fighting the OS)](#8-thread-pinning-fighting-the-os)
+2. [Networking (Zero-Bloat Anonymous Unions)](#2-networking-zero-bloat-anonymous-unions)
+3. [Wait-Free Concurrency (Seqlocks & Ring Buffers)](#3-wait-free-concurrency-seqlocks--ring-buffers)
+4. [Thread Pinning (Fighting the OS)](#4-thread-pinning-fighting-the-os)
+5. [Zero-Allocation (Why `new` is too slow)](#5-zero-allocation-why-new-is-too-slow)
+6. [CPU Caching (OOP vs. Data-Oriented Design)](#6-cpu-caching-oop-vs-data-oriented-design)
+7. [Fast Discovery (Bitmaps & Hardware Magic)](#7-fast-discovery-bitmaps--hardware-magic)
+8. [Pure O(1) Cancellation (Intrusive Lists)](#8-pure-o1-cancellation-intrusive-lists)
 9. [How to Build, Test & Run](#9-how-to-build-test--run)
 10. [Linux Kernel Tuning (Production HFT)](#10-linux-kernel-tuning-production-hft)
 
@@ -85,66 +85,35 @@ It goes to a central Exchange (like Nasdaq). The exchange keeps a massive ledger
 *   **Bids (Buyers):** People who want to buy, sorted by who is willing to pay the most.
 *   **Asks (Sellers):** People who want to sell, sorted by who will sell for the cheapest.
 
-When a buyer's price matches a seller's price, the exchange executes a trade! In the HFT world, we need to do this matching process in less than 1 microsecond. Let's see how we do it.
+When a buyer's price matches a seller's price, the exchange executes a trade! In the HFT world, we need to handle the network traffic and internal matching process in less than 1 microsecond. Let's see how we do it.
 
 ---
 
-## 2. Zero-Allocation (Why `new` is too slow)
+## 2. Networking (Zero-Bloat Anonymous Unions)
 
 ### The Problem
-In your college classes, you probably learned to use `new Order()` or `malloc` whenever you needed to create data. But think about what happens behind the scenes! Your program has to stop, ask the Operating System for memory, wait for the OS to lock a memory table, find a free spot, and return it. This takes thousands of nanoseconds. In HFT, that is an eternity.
+Computers are terrible at processing text strings (like `"AAPL"`) and floating-point decimals (`$103.50`). Decimals cause precision rounding errors, and strings require slow letter-by-letter comparison. Network packets also cost money in transmission time. We must make the incoming TCP `ClientMessage` strictly 16-bytes and absolutely no larger to prevent overflowing hardware cache lines.
 
-### The Solution: Memory Pools
-What if we *never* asked the OS for memory while the market is open? 
-When NanoMatch boots up in the morning, we allocate one massive, continuous block of memory large enough to hold 16.7 million orders. This is called a **Memory Pool**. 
-When an order arrives, we just say: `give me index 0`. Next order? `give me index 1`. No OS required! If an order is canceled, we push that index back into a Stack-based "Free List" to recycle it instantly in $O(1)$ time. 
-**Takeaway:** Pre-allocate everything. Avoid the Operating System at all costs!
+### The Solution: C++ Anonymous Unions & Integers
+*   **Prices:** We multiply all prices by 100. A price of `$103.50` is sent over the network as the whole integer `103500`.
+*   **Tickers:** We don't send `"AAPL"`. We send the integer `0`. The server knows that `0` means Apple. 
 
----
-
-## 3. CPU Caching (OOP vs. Data-Oriented Design)
-
-### The Problem
-Object-Oriented Programming (OOP) teaches us to group data together into objects. You might write:
 ```cpp
-struct Order { uint64_t price; uint32_t qty; uint64_t id; };
+struct ClientMessage {
+    uint8_t type; 
+    uint16_t instrument_id; 
+    uint32_t qty;       
+    union {
+        uint64_t price;     // Used for Add Order (Type 1)
+        uint64_t order_id;  // Used for Cancel Order (Type 4)
+    };
+};
 ```
-Here is the secret about hardware: when a CPU reads memory from RAM, it doesn't read one variable; it grabs a 64-byte chunk called a **Cache Line**. If our engine needs to scan thousands of orders, it is forced to load all the useless `id` data into the ultra-fast L1 Cache too! This clogs up the cache and slows down the CPU.
-
-### The Solution: Structure of Arrays (SoA)
-Instead of grouping data by object, we split it by *type*:
-```cpp
-std::vector<uint64_t> prices;
-std::vector<uint32_t> quantities;
-```
-Now, when the engine searches for the best price, the CPU loads a pure block of just prices. Furthermore, we use `alignas(64)` and `_aligned_malloc()` / `posix_memalign()` to mathematically guarantee that all these pointers land perfectly on 64-byte boundaries, protecting against AVX-512 SIMD segmentation faults.
-**Takeaway:** Think about how the hardware reads memory, not just how the code looks on screen!
+We use a packed struct with an **Anonymous Union**. This elegantly reuses the exact same 8-bytes in memory for both `price` and `order_id` depending on the packet type! This prevents the packet from bleeding over the 16-byte cache boundary while supporting vast new feature-sets over raw TCP sockets.
 
 ---
 
-## 4. Fast Discovery (Bitmaps & Hardware Magic)
-
-### The Problem
-If you need to find the highest bid, how would you do it? A `for` loop, right? `for (int i = 0; i < max; i++)`. But loops require branching logic, which can confuse the CPU pipeline and cause delays.
-
-### The Solution: Bitmaps
-We created a 64-bit integer where **every single bit represents a price level**. If someone bids at $100, we flip the 100th bit from a `0` to a `1`. 
-To find the highest price, we don't loop! We use a special Intel hardware instruction called `__builtin_clzll` (Count Leading Zeros). It scans all 64 bits simultaneously at the hardware level in a single clock cycle.
-
----
-
-## 5. Pure O(1) Cancellation (Intrusive Lists)
-
-### The Problem
-In HFT, over 90% of network messages are order cancellations. If we use a standard `std::list` or `std::vector`, canceling an order requires looping through the queue to find it, which takes $O(N)$ time.
-
-### The Solution: The Intrusive Doubly-Linked List
-We engineered a custom Memory Pool that uses completely parallel `prev` and `next` arrays. Because the arrays perfectly mirror each other, the engine can instantly jump to *any* location in the queue and physically pluck an order out of the middle in pure $O(1)$ time without *ever* scanning memory! 
-If you cancel the order at the absolute Best Bid, the engine flawlessly subtracts the volume, resets the pointers, and instantly triggers the hardware bitmap to clear the price level—all natively in less than 50 nanoseconds.
-
----
-
-## 6. Wait-Free Concurrency (Seqlocks & Ring Buffers)
+## 3. Wait-Free Concurrency (Seqlocks & Ring Buffers)
 
 ### The Problem: Mutexes and Deadlocks
 When two threads need to share data, you are taught to use a `std::mutex` (a lock). But if Thread A holds the lock, Thread B gets "put to sleep" by the OS. Waking a thread back up takes 10,000 nanoseconds! In HFT, we cannot afford to put threads to sleep.
@@ -167,38 +136,69 @@ Because the Writer never stops to wait for locks, the engine stays completely un
 
 ---
 
-## 7. Networking (Zero-Bloat Anonymous Unions)
-
-### The Problem
-Computers are terrible at processing text strings (like `"AAPL"`) and floating-point decimals (`$103.50`). Decimals cause precision rounding errors, and strings require slow letter-by-letter comparison. Network packets also cost money in transmission time. We must make the `ClientMessage` strictly 16-bytes and absolutely no larger.
-
-### The Solution: C++ Anonymous Unions & Integers
-*   **Prices:** We multiply all prices by 100. A price of `$103.50` is sent over the network as the whole integer `103500`.
-*   **Tickers:** We don't send `"AAPL"`. We send the integer `0`. The server knows that `0` means Apple. 
-
-```cpp
-struct ClientMessage {
-    uint8_t type; 
-    uint16_t instrument_id; 
-    uint32_t qty;       
-    union {
-        uint64_t price;     // Used for Add Order (Type 1)
-        uint64_t order_id;  // Used for Cancel Order (Type 4)
-    };
-};
-```
-We use a packed struct with an **Anonymous Union**. This elegantly reuses the exact same 8-bytes in memory for both `price` and `order_id` depending on the packet type! This prevents the packet from bleeding over the 16-byte cache boundary while supporting vast new feature-sets.
-
----
-
-## 8. Thread Pinning (Fighting the OS)
+## 4. Thread Pinning (Fighting the OS)
 
 ### The Problem
 The Windows or Linux task scheduler is always trying to be helpful. It will randomly move your C++ program from CPU Core 0 to CPU Core 3 to balance the power load. But if it moves your program, all of your precious L1 cache data on Core 0 is erased!
 
 ### The Solution: Thread Affinity (NUMA)
-We politely tell the OS to leave us alone using `SetThreadAffinityMask`. We permanently nail our Matching Engine to CPU Core 0. 
-Furthermore, when there are no orders to process, we do not call `sleep()`. We use an Intel instruction called `_mm_pause()` (or compiler barriers on ARM) to rest the CPU to prevent it from overheating, while staying awake enough to react in 1 nanosecond when a new order arrives.
+We politely tell the OS to leave us alone using `SetThreadAffinityMask`. We permanently nail our Network Thread to Core 1 and our Matching Engine to CPU Core 0. 
+Furthermore, when there are no orders to process, we do not call `sleep()`. We use an Intel instruction called `_mm_pause()` (or compiler barriers on ARM) to rest the CPU to prevent it from overheating, while staying awake enough to react in 1 nanosecond when a new TCP packet arrives.
+
+---
+
+## 5. Zero-Allocation (Why `new` is too slow)
+
+### The Problem
+In your college classes, you probably learned to use `new Order()` or `malloc` whenever you needed to create data. But think about what happens behind the scenes! Your program has to stop, ask the Operating System for memory, wait for the OS to lock a memory table, find a free spot, and return it. This takes thousands of nanoseconds. In HFT, that is an eternity.
+
+### The Solution: Memory Pools
+What if we *never* asked the OS for memory while the market is open? 
+When NanoMatch boots up in the morning, we allocate one massive, continuous block of memory large enough to hold 16.7 million orders. This is called a **Memory Pool**. 
+When an order arrives, we just say: `give me index 0`. Next order? `give me index 1`. No OS required! If an order is canceled, we push that index back into a Stack-based "Free List" to recycle it instantly in $O(1)$ time. 
+**Takeaway:** Pre-allocate everything. Avoid the Operating System at all costs!
+
+---
+
+## 6. CPU Caching (OOP vs. Data-Oriented Design)
+
+### The Problem
+Object-Oriented Programming (OOP) teaches us to group data together into objects. You might write:
+```cpp
+struct Order { uint64_t price; uint32_t qty; uint64_t id; };
+```
+Here is the secret about hardware: when a CPU reads memory from RAM, it doesn't read one variable; it grabs a 64-byte chunk called a **Cache Line**. If our engine needs to scan thousands of orders, it is forced to load all the useless `id` data into the ultra-fast L1 Cache too! This clogs up the cache and slows down the CPU.
+
+### The Solution: Structure of Arrays (SoA)
+Instead of grouping data by object, we split it by *type*:
+```cpp
+std::vector<uint64_t> prices;
+std::vector<uint32_t> quantities;
+```
+Now, when the engine searches for the best price, the CPU loads a pure block of just prices. Furthermore, we use `alignas(64)` and `_aligned_malloc()` / `posix_memalign()` to mathematically guarantee that all these pointers land perfectly on 64-byte boundaries, protecting against AVX-512 SIMD segmentation faults.
+**Takeaway:** Think about how the hardware reads memory, not just how the code looks on screen!
+
+---
+
+## 7. Fast Discovery (Bitmaps & Hardware Magic)
+
+### The Problem
+If you need to find the highest bid, how would you do it? A `for` loop, right? `for (int i = 0; i < max; i++)`. But loops require branching logic, which can confuse the CPU pipeline and cause delays.
+
+### The Solution: Bitmaps
+We created a 64-bit integer where **every single bit represents a price level**. If someone bids at $100, we flip the 100th bit from a `0` to a `1`. 
+To find the highest price, we don't loop! We use a special Intel hardware instruction called `__builtin_clzll` (Count Leading Zeros). It scans all 64 bits simultaneously at the hardware level in a single clock cycle.
+
+---
+
+## 8. Pure O(1) Cancellation (Intrusive Lists)
+
+### The Problem
+In HFT, over 90% of network messages are order cancellations. If we use a standard `std::list` or `std::vector`, canceling an order requires looping through the queue to find it, which takes $O(N)$ time.
+
+### The Solution: The Intrusive Doubly-Linked List
+We engineered a custom Memory Pool that uses completely parallel `prev` and `next` arrays. Because the arrays perfectly mirror each other, the engine can instantly jump to *any* location in the queue and physically pluck an order out of the middle in pure $O(1)$ time without *ever* scanning memory! 
+If you cancel the order at the absolute Best Bid, the engine flawlessly subtracts the volume, resets the pointers, and instantly triggers the hardware bitmap to clear the price level—all natively in less than 50 nanoseconds.
 
 ---
 
