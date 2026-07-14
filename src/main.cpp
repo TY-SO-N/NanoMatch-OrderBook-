@@ -5,13 +5,10 @@
 #include "TcpServer.h"
 #include "RingBuffer.h"
 #include "ThreadUtils.h"
+#include "LinuxTuning.h"
 
-// Intel pause intrinsic
-#if defined(_MSC_VER)
-#include <intrin.h>
-#elif defined(__i386__) || defined(__x86_64__)
-#include <x86intrin.h>
-#endif
+// cpu_pause() is provided by LinuxTuning.h for all platforms (x86, ARM, etc.)
+
 
 using namespace NanoMatch;
 
@@ -43,14 +40,18 @@ int main() {
 
         while (true) {
             server.poll();
-            // Network thread can afford to yield briefly if idle to not burn CPU 1
-            // But for pure HFT, we keep it spinning.
+            // Spin-loop with a CPU pause hint to reduce power without yielding to OS.
+            // For pure HFT, this is the correct idle strategy.
+            cpu_pause();
         }
     });
 
     // Start Matching Engine on Core 0
     pinThreadToCore(0);
     std::cout << "\033[96m[NUMA] Matching Engine pinned to Core 0.\033[0m" << std::endl;
+
+    // Linux-only: Lock all memory pages into RAM to prevent page faults during trading
+    lockAllMemory();
     
     // Warm up memory pool (this MUST be called by the matching thread for NUMA locality)
     engine.warmup();
@@ -63,7 +64,7 @@ int main() {
         if (order_queue.pop(msg)) {
             if (msg.type == 1) { // Add Limit Order
                 Side side = (msg.side == 0) ? Side::Buy : Side::Sell;
-                engine.addLimitOrder(side, msg.price, msg.qty);
+                OrderId assigned_id = engine.addLimitOrder(side, msg.price, msg.qty);
                 
                 // Convert Fixed-Point back to Decimal (Multiplier: 100)
                 double price_decimal = msg.price / 100.0;
@@ -75,15 +76,22 @@ int main() {
                 }
                 
                 if (side == Side::Buy) {
-                    std::cout << "[\033[92mMATCHING CORE\033[0m] \033[92mBUY  " << std::left << std::setw(4) << msg.qty << " " << std::setw(5) << ticker << " @ $" << std::fixed << std::setprecision(2) << price_decimal << "\033[0m\n";
+                    std::cout << "[\033[92mMATCHING CORE\033[0m] \033[92mBUY  " << std::left << std::setw(4) << msg.qty << " " << std::setw(5) << ticker << " @ $" << std::fixed << std::setprecision(2) << price_decimal << " [ID: " << assigned_id << "]\033[0m\n";
                 } else {
-                    std::cout << "[\033[91mMATCHING CORE\033[0m] \033[91mSELL " << std::left << std::setw(4) << msg.qty << " " << std::setw(5) << ticker << " @ $" << std::fixed << std::setprecision(2) << price_decimal << "\033[0m\n";
+                    std::cout << "[\033[91mMATCHING CORE\033[0m] \033[91mSELL " << std::left << std::setw(4) << msg.qty << " " << std::setw(5) << ticker << " @ $" << std::fixed << std::setprecision(2) << price_decimal << " [ID: " << assigned_id << "]\033[0m\n";
+                }
+            } else if (msg.type == 4) { // Cancel Order
+                Side side = (msg.side == 0) ? Side::Buy : Side::Sell;
+                if (engine.cancelOrder(side, msg.order_id)) {
+                    std::cout << "[\033[93mMATCHING CORE\033[0m] \033[93mCANCEL\033[0m Order " << msg.order_id << " SUCCESS\n";
+                } else {
+                    std::cout << "[\033[93mMATCHING CORE\033[0m] \033[93mCANCEL\033[0m Order " << msg.order_id << " REJECTED (Not Found / Already Executed)\n";
                 }
             }
         } else {
-            // Queue is empty, pause CPU to prevent thermal throttling
-            // This is a ~40 cycle instruction that doesn't yield to the OS
-            _mm_pause();
+            // Queue is empty, pause CPU to prevent thermal throttling.
+            // cpu_pause() is cross-platform: _mm_pause on x86, yield on ARM.
+            cpu_pause();
         }
     }
 

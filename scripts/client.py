@@ -52,6 +52,17 @@ def send_order(side, instr_id, price_decimal, qty):
     else:
         print(f"[{RED}SENT{RESET}] {RED}SELL {qty:<4} {ticker:<5} @ ${price_decimal:.2f}{RESET}  (ID: {instr_id}, Int: {price_integer})")
 
+def send_cancel(side, instr_id, order_id):
+    # Pack the binary struct (type=4, side, instr_id, qty=0, order_id)
+    payload = struct.pack('<bbHIQ', 4, side, instr_id, 0, order_id)
+    s.sendall(payload)
+    
+    YELLOW = '\033[93m'
+    RESET = '\033[0m'
+    ticker = TICKERS[instr_id]
+    
+    print(f"[{YELLOW}SENT{RESET}] {YELLOW}CANCEL{RESET} Order {order_id} for {ticker}")
+
 print("\033[96m--- Commencing Top 20 Tech Market Maker Burst ---\033[0m")
 
 for i in range(40):
@@ -66,8 +77,15 @@ for i in range(40):
     qty = random.choice([100, 200, 500, 1000])
     send_order(side, instr_id, price_decimal, qty)
     
-    time.sleep(0.05) 
+    time.sleep(0.01) 
+
+print("\n\033[96m--- Testing TCP Order Cancellation ---\033[0m")
+# Send a buy order at a ridiculous price so it doesn't execute
+send_order(0, 0, 50.00, 1000)
+# Immediately send a cancel for order_id = 41 (since 40 orders were sent before this)
+send_cancel(0, 0, 41)
+time.sleep(0.1)
 
 print("\n\033[96m--- Burst Complete ---\033[0m")
-print("Check the C++ Server terminal to see the trades!")
+print("Check the C++ Server terminal to see the trades and cancellations!")
 s.close()

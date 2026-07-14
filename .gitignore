@@ -1,5 +1,6 @@
 # CMake build directories
 build/
+build_test/
 build_asan/
 build_warnings/
 CMakeCache.txt

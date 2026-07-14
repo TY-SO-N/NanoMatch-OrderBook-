@@ -74,3 +74,54 @@ TEST(OrderBookTest, AddLimitOrder) {
 
     // TODO: Verify best_bid and best_ask when accessor methods are added
 }
+
+TEST(OrderBookTest, CancelOrder_MiddleOfQueue) {
+    OrderBook book;
+    book.warmup();
+
+    // Add three bids at the same price
+    OrderId id1 = book.addLimitOrder(Side::Buy, 100, 10);
+    OrderId id2 = book.addLimitOrder(Side::Buy, 100, 20);
+    OrderId id3 = book.addLimitOrder(Side::Buy, 100, 30);
+    EXPECT_NE(id1, NULL_ORDER);
+    EXPECT_NE(id3, NULL_ORDER);
+
+    L2Snapshot snap1 = book.snapshotL2(1);
+    EXPECT_EQ(snap1.num_bids, 1);
+    EXPECT_EQ(snap1.bids[0].qty, 60);
+
+    // Cancel the middle order
+    bool result = book.cancelOrder(Side::Buy, id2);
+    EXPECT_TRUE(result);
+
+    L2Snapshot snap2 = book.snapshotL2(1);
+    EXPECT_EQ(snap2.bids[0].qty, 40); // 10 + 30
+
+    // Match the remaining orders to verify queue linkage (id1 then id3)
+    book.addLimitOrder(Side::Sell, 100, 10); // Should fill id1 entirely
+    book.addLimitOrder(Side::Sell, 100, 30); // Should fill id3 entirely
+
+    L2Snapshot snap3 = book.snapshotL2(1);
+    EXPECT_EQ(snap3.num_bids, 0); // Book should be empty
+}
+
+TEST(OrderBookTest, CancelOrder_HeadClearsBestBid) {
+    OrderBook book;
+    book.warmup();
+
+    OrderId bid1 = book.addLimitOrder(Side::Buy, 100, 10);
+    OrderId bid2 = book.addLimitOrder(Side::Buy, 99, 10);
+    EXPECT_NE(bid2, NULL_ORDER);
+
+    L2Snapshot snap1 = book.snapshotL2(2);
+    EXPECT_EQ(snap1.bids[0].price, 100);
+    EXPECT_EQ(snap1.bids[1].price, 99);
+
+    // Cancel the best bid
+    book.cancelOrder(Side::Buy, bid1);
+
+    // The next best bid should now be 99
+    L2Snapshot snap2 = book.snapshotL2(2);
+    EXPECT_EQ(snap2.num_bids, 1);
+    EXPECT_EQ(snap2.bids[0].price, 99);
+}

@@ -4,9 +4,64 @@ Hello there! If you are a fresher, a student, or a software engineer looking to 
 
 I'm going to walk you through **NanoMatch**, a C++20 Limit Order Book matching engine. 
 
-Think of this repository not just as code, but as an engineering deep-dive. We are going to build an engine that runs at **13 Million operations per second** with a delay of just **50 CPU cycles**. 
+Think of this repository not just as code, but as an engineering deep-dive. We engineered this engine to process **14 Million operations per second** with an average latency of exactly **~55 CPU cycles**. 
 
 To get that fast, we have to break almost every rule you were taught in traditional Computer Science classes. Let's explore exactly *why* standard programming fails in HFT, and how we engineered around it!
+
+---
+
+## 🏗 System Architecture
+
+```mermaid
+graph TD
+    %% Define Styles
+    classDef client fill:#2a9d8f,stroke:#fff,stroke-width:2px,color:#fff;
+    classDef network fill:#e9c46a,stroke:#333,stroke-width:2px,color:#000;
+    classDef queue fill:#f4a261,stroke:#333,stroke-width:2px,color:#000;
+    classDef core fill:#e76f51,stroke:#fff,stroke-width:2px,color:#fff;
+    classDef memory fill:#264653,stroke:#fff,stroke-width:2px,color:#fff;
+
+    %% Client Layer
+    Bot["🤖 Trading Bot<br/>(Python Client)"]:::client
+
+    %% Network Layer
+    subgraph NetworkThread ["Network Thread (Core 1)"]
+        TCP["TcpServer::poll()<br/>O(N) Zero-Copy Batching"]:::network
+        Union["ClientMessage (16-bytes)<br/>Type 1: Limit | Type 4: Cancel"]:::network
+        TCP -->|Parses exact bytes| Union
+    end
+
+    %% IPC Layer
+    RingBuffer{{"SPSC RingBuffer<br/>(std::memory_order_release)"}}:::queue
+
+    %% Matching Core Layer
+    subgraph CoreThread ["Matching Engine Thread (Core 0)"]
+        SpinLoop["main.cpp Spin Loop<br/>(_mm_pause / busy-poll)"]:::core
+        Engine["OrderBook::addLimitOrder()<br/>OrderBook::cancelOrder()"]:::core
+        
+        subgraph DataStructures ["Data Structures (Cache-Aligned)"]
+            BitMap["active_bids / active_asks<br/>(64-bit Bitsets + clzll)"]:::memory
+            MemoryPool["OrderPool (SoA)<br/>(O(1) Intrusive Linked List)"]:::memory
+            Depth["depth_bids / depth_asks<br/>(L2 Volume Arrays)"]:::memory
+        end
+        
+        SpinLoop -->|Pops messages| Engine
+        Engine -->|O(1) Price Lookup| BitMap
+        Engine -->|Allocates/Plucks Order| MemoryPool
+        Engine -->|Updates Volume| Depth
+    end
+
+    %% Market Data Layer
+    SeqLock{{"Seqlock<br/>(Tear-Free Synchronization)"}}:::queue
+    Broadcaster["snapshotL2()<br/>(Wait-Free Reader)"]:::client
+
+    %% Data Flow
+    Bot == "Raw TCP Bytes" ==> TCP
+    Union == "queue_.push()" ==> RingBuffer
+    RingBuffer == "queue_.pop()<br/>(std::memory_order_acquire)" ==> SpinLoop
+    Depth -. "Protected by writeLock()" .-> SeqLock
+    SeqLock -. "Reader verifies Sequence" .-> Broadcaster
+```
 
 ---
 
@@ -15,10 +70,12 @@ To get that fast, we have to break almost every rule you were taught in traditio
 2. [Zero-Allocation (Why `new` is too slow)](#2-zero-allocation-why-new-is-too-slow)
 3. [CPU Caching (OOP vs. Data-Oriented Design)](#3-cpu-caching-oop-vs-data-oriented-design)
 4. [Fast Discovery (Bitmaps & Hardware Magic)](#4-fast-discovery-bitmaps--hardware-magic)
-5. [Concurrency (Lock-Free Queues)](#5-concurrency-lock-free-queues)
-6. [Thread Pinning (Fighting the OS)](#6-thread-pinning-fighting-the-os)
-7. [Networking (Strings and Floats are forbidden)](#7-networking-strings-and-floats-are-forbidden)
-8. [Trade-Offs & How to Run](#8-trade-offs--how-to-run)
+5. [Pure O(1) Cancellation (Intrusive Lists)](#5-pure-o1-cancellation-intrusive-lists)
+6. [Wait-Free Concurrency (Seqlocks & Ring Buffers)](#6-wait-free-concurrency-seqlocks--ring-buffers)
+7. [Networking (Zero-Bloat Anonymous Unions)](#7-networking-zero-bloat-anonymous-unions)
+8. [Thread Pinning (Fighting the OS)](#8-thread-pinning-fighting-the-os)
+9. [How to Build, Test & Run](#9-how-to-build-test--run)
+10. [Linux Kernel Tuning (Production HFT)](#10-linux-kernel-tuning-production-hft)
 
 ---
 
@@ -39,8 +96,8 @@ In your college classes, you probably learned to use `new Order()` or `malloc` w
 
 ### The Solution: Memory Pools
 What if we *never* asked the OS for memory while the market is open? 
-When NanoMatch boots up in the morning, we allocate one massive, continuous block of memory large enough to hold 1,000,000 orders. This is called a **Memory Pool**. 
-When an order arrives, we just say: `give me index 0`. Next order? `give me index 1`. No OS required! If an order is canceled, we put that index into a "Free List" to recycle it later. 
+When NanoMatch boots up in the morning, we allocate one massive, continuous block of memory large enough to hold 16.7 million orders. This is called a **Memory Pool**. 
+When an order arrives, we just say: `give me index 0`. Next order? `give me index 1`. No OS required! If an order is canceled, we push that index back into a Stack-based "Free List" to recycle it instantly in $O(1)$ time. 
 **Takeaway:** Pre-allocate everything. Avoid the Operating System at all costs!
 
 ---
@@ -52,7 +109,7 @@ Object-Oriented Programming (OOP) teaches us to group data together into objects
 ```cpp
 struct Order { uint64_t price; uint32_t qty; uint64_t id; };
 ```
-Here is the secret about hardware: when a CPU reads memory from RAM, it doesn't read one variable; it grabs a 64-byte chunk called a **Cache Line**. If our engine needs to scan thousands of orders just to find the best `price`, it is forced to load all the useless `qty` and `id` data into the ultra-fast L1 Cache too! This clogs up the cache and slows down the CPU.
+Here is the secret about hardware: when a CPU reads memory from RAM, it doesn't read one variable; it grabs a 64-byte chunk called a **Cache Line**. If our engine needs to scan thousands of orders, it is forced to load all the useless `id` data into the ultra-fast L1 Cache too! This clogs up the cache and slows down the CPU.
 
 ### The Solution: Structure of Arrays (SoA)
 Instead of grouping data by object, we split it by *type*:
@@ -60,7 +117,7 @@ Instead of grouping data by object, we split it by *type*:
 std::vector<uint64_t> prices;
 std::vector<uint32_t> quantities;
 ```
-Now, when the engine searches for the best price, the CPU loads a pure block of just prices. It can scan them instantly without loading any useless data.
+Now, when the engine searches for the best price, the CPU loads a pure block of just prices. Furthermore, we use `alignas(64)` and `_aligned_malloc()` / `posix_memalign()` to mathematically guarantee that all these pointers land perfectly on 64-byte boundaries, protecting against AVX-512 SIMD segmentation faults.
 **Takeaway:** Think about how the hardware reads memory, not just how the code looks on screen!
 
 ---
@@ -71,87 +128,139 @@ Now, when the engine searches for the best price, the CPU loads a pure block of 
 If you need to find the highest bid, how would you do it? A `for` loop, right? `for (int i = 0; i < max; i++)`. But loops require branching logic, which can confuse the CPU pipeline and cause delays.
 
 ### The Solution: Bitmaps
-We created a 64-bit integer where **every single bit represents a price**. If someone bids at $100, we flip the 100th bit from a `0` to a `1`. 
+We created a 64-bit integer where **every single bit represents a price level**. If someone bids at $100, we flip the 100th bit from a `0` to a `1`. 
 To find the highest price, we don't loop! We use a special Intel hardware instruction called `__builtin_clzll` (Count Leading Zeros). It scans all 64 bits simultaneously at the hardware level in a single clock cycle.
-**Takeaway:** Let the silicon do the heavy lifting!
 
 ---
 
-## 5. Concurrency: The SPSC Lock-Free Queue (Deep Dive)
+## 5. Pure O(1) Cancellation (Intrusive Lists)
+
+### The Problem
+In HFT, over 90% of network messages are order cancellations. If we use a standard `std::list` or `std::vector`, canceling an order requires looping through the queue to find it, which takes $O(N)$ time.
+
+### The Solution: The Intrusive Doubly-Linked List
+We engineered a custom Memory Pool that uses completely parallel `prev` and `next` arrays. Because the arrays perfectly mirror each other, the engine can instantly jump to *any* location in the queue and physically pluck an order out of the middle in pure $O(1)$ time without *ever* scanning memory! 
+If you cancel the order at the absolute Best Bid, the engine flawlessly subtracts the volume, resets the pointers, and instantly triggers the hardware bitmap to clear the price level—all natively in less than 50 nanoseconds.
+
+---
+
+## 6. Wait-Free Concurrency (Seqlocks & Ring Buffers)
 
 ### The Problem: Mutexes and Deadlocks
 When two threads need to share data, you are taught to use a `std::mutex` (a lock). But if Thread A holds the lock, Thread B gets "put to sleep" by the OS. Waking a thread back up takes 10,000 nanoseconds! In HFT, we cannot afford to put threads to sleep.
 
-### The Solution: Single-Producer Single-Consumer (SPSC) Ring Buffer
-To pass data from the Network Thread to the Matching Engine, we built a Lock-Free Ring Buffer. 
-Think of it like a circular sushi conveyor belt:
-*   **The Producer (Network Thread):** Only puts sushi on empty plates. It is the *only* thread that updates the `tail` index.
-*   **The Consumer (Matching Engine):** Only eats sushi from full plates. It is the *only* thread that updates the `head` index.
-Because they follow these strict rules, they never have to talk to each other (no Mutex required!).
-
-### Atomic Memory Orders (The Magic)
-Even without locks, modern CPUs are so fast they try to reorder instructions. A CPU might try to update the `tail` index *before* it finishes writing the actual data to RAM! To stop this, we use strict memory fences:
-*   **`std::memory_order_release`:** Used by the Producer. It guarantees that the CPU finishes writing the data to the array *before* the `tail` index is updated.
-*   **`std::memory_order_acquire`:** Used by the Consumer. It guarantees that the CPU sees the most up-to-date `tail` index *before* it attempts to read the data.
+### The Network Queue: Single-Producer Single-Consumer (SPSC) Ring Buffer
+To pass incoming orders from the Network TCP Thread to the Matching Engine, we built a Lock-Free Ring Buffer. 
+*   **The Producer (Network Thread):** Only updates the `tail` index. Uses `std::memory_order_release` to guarantee the CPU finishes writing the data to the array *before* the `tail` index is updated.
+*   **The Consumer (Matching Engine):** Only updates the `head` index. Uses `std::memory_order_acquire` to guarantee the CPU sees the most up-to-date `tail` index *before* it attempts to read the data.
 
 ### The Hardware Hack: False Sharing & `alignas(64)`
-A CPU reads memory in 64-byte chunks called **Cache Lines**. If you declare `head` and `tail` normally, the compiler puts them right next to each other. When the Producer updates `tail` on Core 1, the hardware invalidates the Consumer's L1 cache on Core 0, forcing Core 0 to reload the cache line even though `head` didn't change! This destroys performance. 
-We fixed this by forcing `head` and `tail` onto separate physical cache lines using `alignas(64)`. The CPU cores are now completely isolated.
+If you declare `head` and `tail` normally, the compiler puts them right next to each other on the same 64-byte Cache Line. When the Producer updates `tail` on Core 1, the hardware invalidates the Consumer's L1 cache on Core 0, forcing Core 0 to reload the cache line even though `head` didn't change! We fixed this by forcing `head` and `tail` onto separate physical cache lines using `alignas(64)`. The CPU cores are now completely isolated.
 
-### The Math Hack: Bitwise Power of 2
-To wrap a ring buffer around, you normally use the modulo operator `(index % capacity)`. However, hardware division takes **15 to 20 CPU cycles**. We bypassed this by forcing our queue capacity to be a strict **Power of Two**. This allows us to use a bitwise AND operator `(index & (Capacity - 1))`, which wraps the array perfectly in exactly **1 CPU cycle**.
+### Market Data Broadcasting: The Seqlock
+We need our matching engine (Writer thread) to continuously update the Orderbook, while a market-data thread (Reader thread) simultaneously snaps a picture of the L2 Market Depth to broadcast it. 
+We implemented a **Sequence Lock**. 
+1. The Reader starts reading and notes a "Sequence Number".
+2. The Writer (Matching Engine) increments the number, mutates the Orderbook, and increments it again.
+3. The Reader finishes reading and checks the Sequence Number. If the number is odd (Writer is actively writing) or if the number changed during the read, the Reader knows its snapshot was "torn" and simply tries again!
+Because the Writer never stops to wait for locks, the engine stays completely unblocked!
 
 ---
 
-## 6. Thread Pinning (Fighting the OS)
+## 7. Networking (Zero-Bloat Anonymous Unions)
+
+### The Problem
+Computers are terrible at processing text strings (like `"AAPL"`) and floating-point decimals (`$103.50`). Decimals cause precision rounding errors, and strings require slow letter-by-letter comparison. Network packets also cost money in transmission time. We must make the `ClientMessage` strictly 16-bytes and absolutely no larger.
+
+### The Solution: C++ Anonymous Unions & Integers
+*   **Prices:** We multiply all prices by 100. A price of `$103.50` is sent over the network as the whole integer `103500`.
+*   **Tickers:** We don't send `"AAPL"`. We send the integer `0`. The server knows that `0` means Apple. 
+
+```cpp
+struct ClientMessage {
+    uint8_t type; 
+    uint16_t instrument_id; 
+    uint32_t qty;       
+    union {
+        uint64_t price;     // Used for Add Order (Type 1)
+        uint64_t order_id;  // Used for Cancel Order (Type 4)
+    };
+};
+```
+We use a packed struct with an **Anonymous Union**. This elegantly reuses the exact same 8-bytes in memory for both `price` and `order_id` depending on the packet type! This prevents the packet from bleeding over the 16-byte cache boundary while supporting vast new feature-sets.
+
+---
+
+## 8. Thread Pinning (Fighting the OS)
 
 ### The Problem
 The Windows or Linux task scheduler is always trying to be helpful. It will randomly move your C++ program from CPU Core 0 to CPU Core 3 to balance the power load. But if it moves your program, all of your precious L1 cache data on Core 0 is erased!
 
 ### The Solution: Thread Affinity (NUMA)
 We politely tell the OS to leave us alone using `SetThreadAffinityMask`. We permanently nail our Matching Engine to CPU Core 0. 
-Furthermore, when there are no orders to process, we do not call `sleep()`. We use an Intel instruction called `_mm_pause()` to rest the CPU to prevent it from overheating, while staying awake enough to react in 1 nanosecond when a new order arrives.
+Furthermore, when there are no orders to process, we do not call `sleep()`. We use an Intel instruction called `_mm_pause()` (or compiler barriers on ARM) to rest the CPU to prevent it from overheating, while staying awake enough to react in 1 nanosecond when a new order arrives.
 
 ---
 
-## 7. Networking (Strings and Floats are forbidden)
+## 9. How to Build, Test & Run
 
-### The Problem
-Computers are terrible at processing text strings (like `"AAPL"`) and floating-point decimals (`$103.50`). Decimals cause precision rounding errors, and strings require slow letter-by-letter comparison.
+You can run this full distributed exchange right now. You just need CMake and Python.
 
-### The Solution: Integers Only!
-*   **Prices:** We multiply all prices by 100. A price of `$103.50` is sent over the network as the whole integer `103500`.
-*   **Tickers:** We don't send `"AAPL"`. We send the integer `0`. The server knows that `0` means Apple. 
-We pack this data into a perfectly tight 16-byte binary structure and send it over the TCP socket. We also enable `TCP_NODELAY` to force the OS to send the packet instantly rather than batching it up!
+**1. Build the Exchange:**
 
----
-
-## 8. Trade-Offs & How to Run
-
-As an engineer, you must always understand your trade-offs:
-1. **Memory vs. Latency:** By using Bitmaps, we waste a lot of RAM to hold empty price slots. But in HFT, RAM is cheap, and CPU cycles are priceless!
-2. **TCP vs UDP:** We used TCP for orders because if an order drops, we *must* know about it. Re-inventing guaranteed delivery over UDP is often slower than the OS TCP stack.
-
-### Try it yourself!
-You can run this full distributed exchange right now on your computer. You just need CMake and Python.
-
-**1. Build the C++ Exchange:**
+*Windows (MinGW/MSYS2):*
 ```powershell
 mkdir build && cd build
 cmake ..
-cmake --build . --target NanoMatchServer
+cmake --build . --target NanoMatchServer NanoMatchTests
 ```
 
-**2. Start the Engine (Terminal 1):**
+*Linux (GCC/Clang):*
+```bash
+mkdir build && cd build
+cmake .. -DCMAKE_CXX_COMPILER=g++
+cmake --build . --target NanoMatchServer NanoMatchTests
+```
+
+**2. Run the Rigorous Google Test Suite:**
+We built 14 adversarial tests that mathematically prove memory alignment, Price-Time priority, partial fills, TCP network stream fragmentation, and OOM stability.
+```powershell
+.\tests\NanoMatchTests.exe
+```
+
+**3. Start the TCP Server (Terminal 1):**
 ```powershell
 .\src\NanoMatchServer.exe
 ```
 
-**3. Stream Live Trades (Terminal 2):**
-Open a second terminal and run our algorithmic Python market-maker to see the color-coded Wall Street feed stream in real-time!
-```powershell
+**4. Stream Live Trades (Terminal 2):**
+Open a second terminal and run our algorithmic Python market-maker to see the color-coded Wall Street feed stream in real-time over raw TCP sockets!
+```bash
 cd scripts
 python client.py
 ```
 
-If you run the `NanoMatchTests.exe` in the `build/tests/` folder, you can watch the engine dynamically process 10,000 random orders perfectly. Have fun!
+---
+
+## 10. Linux Kernel Tuning (Production HFT)
+
+For maximum determinism on Linux, apply these kernel parameters:
+
+**CPU Isolation** — Remove matching engine cores from the OS scheduler:
+```bash
+# /etc/default/grub
+GRUB_CMDLINE_LINUX="isolcpus=0,1 nohz_full=0,1 rcu_nocbs=0,1"
+sudo update-grub && sudo reboot
+```
+
+**Huge Pages** — Reduce TLB misses for the 512MB memory pool:
+```bash
+echo 1024 | sudo tee /proc/sys/vm/nr_hugepages
+# Permanent: add vm.nr_hugepages=1024 to /etc/sysctl.conf
+```
+
+**Network Tuning** — Enable kernel busy-polling for sockets:
+```bash
+sudo sysctl -w net.core.busy_read=50
+sudo sysctl -w net.core.busy_poll=50
+```

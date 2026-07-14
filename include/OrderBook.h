@@ -129,6 +129,80 @@ namespace NanoMatch {
             return id;
         }
 
+        /**
+         * Pure O(1) Order Cancellation
+         * Plucks the order out of the doubly-linked list without any scanning.
+         */
+        bool cancelOrder(Side side, OrderId id) {
+            if (id == NULL_ORDER || id == EXECUTED_ORDER) [[unlikely]] {
+                return false;
+            }
+
+            l2_lock.writeLock();
+
+            Price price = pool.prices[id];
+            Quantity qty = pool.quantities[id];
+
+            // Verify order is still alive (crude ABA protection / state check)
+            if (qty == 0 || price == 0 || price >= MAX_PRICE) [[unlikely]] {
+                l2_lock.writeUnlock();
+                return false;
+            }
+
+            if (side == Side::Buy) {
+                depth_bids[price] -= qty;
+
+                OrderId prev = pool.prev[id];
+                OrderId next = pool.next[id];
+
+                if (prev != NULL_ORDER) {
+                    pool.next[prev] = next;
+                } else {
+                    bid_heads[price] = next;
+                }
+
+                if (next != NULL_ORDER) {
+                    pool.prev[next] = prev;
+                } else {
+                    bid_tails[price] = prev;
+                }
+
+                if (bid_heads[price] == NULL_ORDER) {
+                    active_bids[price / 64] &= ~(1ULL << (price % 64));
+                    if (price == best_bid) best_bid = findNextBestBid(best_bid);
+                }
+            } else {
+                depth_asks[price] -= qty;
+
+                OrderId prev = pool.prev[id];
+                OrderId next = pool.next[id];
+
+                if (prev != NULL_ORDER) {
+                    pool.next[prev] = next;
+                } else {
+                    ask_heads[price] = next;
+                }
+
+                if (next != NULL_ORDER) {
+                    pool.prev[next] = prev;
+                } else {
+                    ask_tails[price] = prev;
+                }
+
+                if (ask_heads[price] == NULL_ORDER) {
+                    active_asks[price / 64] &= ~(1ULL << (price % 64));
+                    if (price == best_ask) best_ask = findNextBestAsk(best_ask);
+                }
+            }
+
+            // Mark dead and return to free list
+            pool.quantities[id] = 0;
+            pool.deallocate(id);
+
+            l2_lock.writeUnlock();
+            return true;
+        }
+
     private:
         // Core execution: Matches an incoming Buy order against resting Asks
         inline void matchWithAsk(Price /* incoming_price */, Quantity& incoming_qty) {
